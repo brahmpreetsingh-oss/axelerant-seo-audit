@@ -1,0 +1,34 @@
+name: Axelerant Daily SEO Audit (Detailed)
+
+on:
+  schedule:
+    - cron: "30 3 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      target_domain:
+        description: "Domain to audit"
+        required: false
+        default: "axelerant.com"
+      slack_channel_id:
+        description: "Slack channel ID"
+        required: false
+        default: "C07B43GM812"
+
+jobs:
+  seo-audit:
+    name: Full SEO Audit → Slack Canvas
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run Detailed SEO Audit
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id || 'C07B43GM812' }}
+          TARGET_DOMAIN: ${{ inputs.target_domain || 'axelerant.com' }}
+        run: node seo-audit.js
