@@ -1,290 +1,279 @@
 /**
- * Axelerant Daily SEO Audit — Detailed Analysis
- * Matches the depth of a manual Semrush audit:
- *   - US & UK domain overview (keywords, traffic, value)
- *   - Top ranking keywords per region
- *   - Quick wins (pos 4–20) with full context
- *   - Competitor gap analysis vs appnovation + specbee
- *   - New keyword opportunities (low KD, high CPC)
- *   - AI-generated strategic recommendations
+ * Axelerant Daily SEO Audit — v4 (Direct API Edition)
+ * Uses Semrush REST API + Slack API directly — no MCP dependency.
  *
- * Output: Slack Canvas (full report) + summary card in channel
- * Channel: #wg-digital-bu-new-revenue (C07B43GM812)
- * Schedule: 9:00 AM IST daily via GitHub Actions
+ * Posts to: #wg-digital-bu-new-revenue (C07B43GM812)
+ * Schedule: 9:00 AM IST daily (Mon–Fri) via GitHub Actions
  *
- * ENV VARS:
- *   ANTHROPIC_API_KEY  (required)
- *   SLACK_CHANNEL_ID   (default: C07B43GM812)
- *   TARGET_DOMAIN      (default: axelerant.com)
+ * REQUIRED ENV VARS (add all 3 as GitHub Secrets):
+ *   ANTHROPIC_API_KEY   — https://console.anthropic.com/settings/keys
+ *   SEMRUSH_API_KEY     — https://www.semrush.com/api-analytics/
+ *   SLACK_BOT_TOKEN     — https://api.slack.com/apps → your app → OAuth tokens
+ * OPTIONAL:
+ *   SLACK_CHANNEL_ID    — default: C07B43GM812 (#wg-digital-bu-new-revenue)
+ *   TARGET_DOMAIN       — default: axelerant.com
  */
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const SLACK_CHANNEL_ID  = process.env.SLACK_CHANNEL_ID || "C07B43GM812";
-const DOMAIN            = process.env.TARGET_DOMAIN    || "axelerant.com";
+const SEMRUSH_API_KEY   = process.env.SEMRUSH_API_KEY;
+const SLACK_BOT_TOKEN   = process.env.SLACK_BOT_TOKEN;
+const SLACK_CHANNEL_ID  = process.env.SLACK_CHANNEL_ID  || "C07B43GM812";
+const DOMAIN            = process.env.TARGET_DOMAIN     || "axelerant.com";
 const COMPETITORS       = ["appnovation.com", "specbee.com", "elevatedthird.com"];
 
-if (!ANTHROPIC_API_KEY) { console.error("❌ ANTHROPIC_API_KEY not set."); process.exit(1); }
+// Validate all required keys upfront
+const missing = ["ANTHROPIC_API_KEY","SEMRUSH_API_KEY","SLACK_BOT_TOKEN"].filter(k => !process.env[k]);
+if (missing.length) { console.error(`❌ Missing env vars: ${missing.join(", ")}`); process.exit(1); }
 
-// ─── Core API caller ──────────────────────────────────────────────────────────
-async function callClaude(prompt, mcpServers = [], maxTokens = 6000) {
+// ─── Semrush API caller ───────────────────────────────────────────────────────
+async function semrush(params) {
+  const qs = new URLSearchParams({ ...params, key: SEMRUSH_API_KEY }).toString();
+  const url = `https://api.semrush.com/?${qs}`;
+  const res = await fetch(url);
+  const text = await res.text();
+  if (text.startsWith("ERROR")) throw new Error(`Semrush error: ${text}`);
+
+  // Parse CSV response into array of objects
+  const lines = text.trim().split("\n");
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(";");
+  return lines.slice(1).map(line => {
+    const vals = line.split(";");
+    return Object.fromEntries(headers.map((h, i) => [h, vals[i]]));
+  });
+}
+
+// ─── Anthropic API caller ─────────────────────────────────────────────────────
+async function callClaude(prompt, maxTokens = 3000) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-beta": "mcp-client-2025-04-04"
+      "anthropic-version": "2023-06-01"
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
       max_tokens: maxTokens,
-      messages: [{ role: "user", content: prompt }],
-      mcp_servers: mcpServers
+      messages: [{ role: "user", content: prompt }]
     })
   });
-
-  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`Claude API ${res.status}: ${await res.text()}`);
   const data = await res.json();
   return data.content.filter(b => b.type === "text").map(b => b.text).join("").replace(/```json|```/g, "").trim();
 }
 
-const SEMRUSH = [{ type: "url", url: "https://mcp.semrush.com/v1/mcp", name: "semrush" }];
-const SLACK   = [{ type: "url", url: "https://mcp.slack.com/mcp",      name: "slack"   }];
-
-// ─── MODULE 1: Domain Overview (US + UK) ─────────────────────────────────────
-async function fetchDomainOverview() {
-  console.log("📊 [1/5] Domain overview US + UK...");
-  const raw = await callClaude(`
-Use the Semrush MCP domain_rank report to get domain overview stats for "${DOMAIN}".
-Run it twice: once for database "us" and once for database "uk".
-Export columns: Or, Ot, Oc, Ad
-
-Return ONLY raw JSON (no markdown):
-{
-  "us": { "keywords": 0, "traffic": 0, "traffic_value": 0, "paid_keywords": 0 },
-  "uk": { "keywords": 0, "traffic": 0, "traffic_value": 0, "paid_keywords": 0 }
-}`, SEMRUSH);
-  try { return JSON.parse(raw); } catch { console.warn("⚠️  overview parse fail"); return {}; }
+// ─── Slack API caller ─────────────────────────────────────────────────────────
+async function slackPost(method, body) {
+  const res = await fetch(`https://slack.com/api/${method}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${SLACK_BOT_TOKEN}`
+    },
+    body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(`Slack ${method} error: ${data.error}`);
+  return data;
 }
 
-// ─── MODULE 2: Top Keywords + Quick Wins (US) ────────────────────────────────
+// ─── MODULE 1: Domain Overview ────────────────────────────────────────────────
+async function fetchOverview() {
+  console.log("📊 [1/5] Domain overview...");
+  const [us, uk] = await Promise.all([
+    semrush({ type: "domain_rank", domain: DOMAIN, database: "us", export_columns: "Or,Ot,Oc,Ad" }),
+    semrush({ type: "domain_rank", domain: DOMAIN, database: "uk", export_columns: "Or,Ot,Oc,Ad" })
+  ]);
+  const parse = (rows) => rows[0] ? {
+    keywords: parseInt(rows[0]["Organic Keywords"] || 0),
+    traffic:  parseInt(rows[0]["Organic Traffic"]  || 0),
+    value:    parseInt(rows[0]["Organic Cost"]      || 0),
+    paid:     parseInt(rows[0]["Adwords Keywords"]  || 0)
+  } : {};
+  return { us: parse(us), uk: parse(uk) };
+}
+
+// ─── MODULE 2: US Rankings ────────────────────────────────────────────────────
 async function fetchUSRankings() {
   console.log("🇺🇸 [2/5] US rankings + quick wins...");
-  const raw = await callClaude(`
-Use Semrush MCP domain_organic report for domain "${DOMAIN}", database "us".
-
-Run it twice:
-1. Top keywords: display_limit 30, display_sort "nq_desc", export_columns Ph,Po,Nq,Cp,Ur,Kd
-2. Quick wins (positions 4-20): display_limit 30, display_filter "+|Po|Gt|3|+|Po|Lt|21", display_sort "nq_desc", export_columns Ph,Po,Nq,Cp,Ur,Kd
-
-Return ONLY raw JSON (no markdown):
-{
-  "top_keywords": [
-    { "keyword": "", "position": 0, "volume": 0, "cpc": "0.00", "kd": 0, "url": "" }
-  ],
-  "quick_wins": [
-    { "keyword": "", "position": 0, "volume": 0, "cpc": "0.00", "kd": 0, "url": "" }
-  ]
-}`, SEMRUSH, 6000);
-  try { return JSON.parse(raw); } catch { console.warn("⚠️  US rankings parse fail"); return { top_keywords: [], quick_wins: [] }; }
+  const cols = "Ph,Po,Nq,Cp,Ur,Kd";
+  const [top, wins] = await Promise.all([
+    semrush({ type: "domain_organic", domain: DOMAIN, database: "us", display_limit: 25, display_sort: "nq_desc", export_columns: cols }),
+    semrush({ type: "domain_organic", domain: DOMAIN, database: "us", display_limit: 25, display_sort: "nq_desc", display_filter: "+|Po|Gt|3|+|Po|Lt|21", export_columns: cols })
+  ]);
+  const map = rows => rows.map(r => ({
+    keyword:  r["Keyword"] || r["Ph"] || "",
+    position: parseInt(r["Position"] || r["Po"] || 0),
+    volume:   parseInt(r["Search Volume"] || r["Nq"] || 0),
+    cpc:      parseFloat(r["CPC"] || r["Cp"] || 0).toFixed(2),
+    kd:       parseInt(r["Keyword Difficulty"] || r["Kd"] || 0),
+    url:      r["URL"] || r["Ur"] || ""
+  }));
+  return { top_keywords: map(top), quick_wins: map(wins) };
 }
 
-// ─── MODULE 3: Top Keywords + Quick Wins (UK) ────────────────────────────────
+// ─── MODULE 3: UK Rankings ────────────────────────────────────────────────────
 async function fetchUKRankings() {
   console.log("🇬🇧 [3/5] UK rankings + quick wins...");
-  const raw = await callClaude(`
-Use Semrush MCP domain_organic report for domain "${DOMAIN}", database "uk".
-
-Run it twice:
-1. Top keywords: display_limit 30, display_sort "nq_desc", export_columns Ph,Po,Nq,Cp,Ur,Kd
-2. Quick wins (positions 4-20): display_limit 30, display_filter "+|Po|Gt|3|+|Po|Lt|21", display_sort "nq_desc", export_columns Ph,Po,Nq,Cp,Ur,Kd
-
-Return ONLY raw JSON (no markdown):
-{
-  "top_keywords": [
-    { "keyword": "", "position": 0, "volume": 0, "cpc": "0.00", "kd": 0, "url": "" }
-  ],
-  "quick_wins": [
-    { "keyword": "", "position": 0, "volume": 0, "cpc": "0.00", "kd": 0, "url": "" }
-  ]
-}`, SEMRUSH, 6000);
-  try { return JSON.parse(raw); } catch { console.warn("⚠️  UK rankings parse fail"); return { top_keywords: [], quick_wins: [] }; }
+  const cols = "Ph,Po,Nq,Cp,Ur,Kd";
+  const [top, wins] = await Promise.all([
+    semrush({ type: "domain_organic", domain: DOMAIN, database: "uk", display_limit: 25, display_sort: "nq_desc", export_columns: cols }),
+    semrush({ type: "domain_organic", domain: DOMAIN, database: "uk", display_limit: 25, display_sort: "nq_desc", display_filter: "+|Po|Gt|3|+|Po|Lt|21", export_columns: cols })
+  ]);
+  const map = rows => rows.map(r => ({
+    keyword:  r["Keyword"] || r["Ph"] || "",
+    position: parseInt(r["Position"] || r["Po"] || 0),
+    volume:   parseInt(r["Search Volume"] || r["Nq"] || 0),
+    cpc:      parseFloat(r["CPC"] || r["Cp"] || 0).toFixed(2),
+    kd:       parseInt(r["Keyword Difficulty"] || r["Kd"] || 0),
+    url:      r["URL"] || r["Ur"] || ""
+  }));
+  return { top_keywords: map(top), quick_wins: map(wins) };
 }
 
 // ─── MODULE 4: Competitor Gap Analysis ───────────────────────────────────────
 async function fetchCompetitorGaps() {
-  console.log("🏁 [4/5] Competitor gap analysis...");
-  const raw = await callClaude(`
-Use Semrush MCP tools for a competitor gap analysis for "${DOMAIN}" in the US market.
-
-Step 1 — Run domain_organic_organic for "${DOMAIN}", database "us", display_limit 5.
-This gives you the top organic competitors.
-
-Step 2 — Run domain_domains with:
-  domains: "*|or|${COMPETITORS[0]}|+|or|${COMPETITORS[1]}|-|or|${DOMAIN}"
-  database: "us"
-  display_limit: 30
-  display_sort: "nq_desc"
-  export_columns: Ph,P0,P1,P2,Nq,Cp,Kd
-
-These are keywords competitors rank for that ${DOMAIN} does NOT rank for.
-
-Step 3 — Also run domain_domains for UK:
-  domains: "*|or|${COMPETITORS[0]}|+|or|${COMPETITORS[2]}|-|or|${DOMAIN}"
-  database: "uk"
-  display_limit: 20
-  display_sort: "nq_desc"
-  export_columns: Ph,P0,P1,P2,Nq,Cp,Kd
-
-Return ONLY raw JSON (no markdown):
-{
-  "top_competitors": [
-    { "domain": "", "relevance": 0, "organic_keywords": 0, "organic_traffic": 0 }
-  ],
-  "us_gaps": [
-    { "keyword": "", "volume": 0, "cpc": "0.00", "kd": 0, "competitor1_pos": 0, "competitor2_pos": 0 }
-  ],
-  "uk_gaps": [
-    { "keyword": "", "volume": 0, "cpc": "0.00", "kd": 0, "competitor1_pos": 0, "competitor2_pos": 0 }
-  ]
-}`, SEMRUSH, 6000);
-  try { return JSON.parse(raw); } catch { console.warn("⚠️  competitor gaps parse fail"); return { top_competitors: [], us_gaps: [], uk_gaps: [] }; }
+  console.log("🏁 [4/5] Competitor gaps...");
+  const cols = "Ph,P0,P1,P2,Nq,Cp,Kd";
+  const domainsUS = `*|or|${COMPETITORS[0]}|+|or|${COMPETITORS[1]}|-|or|${DOMAIN}`;
+  const domainsUK = `*|or|${COMPETITORS[0]}|+|or|${COMPETITORS[2]}|-|or|${DOMAIN}`;
+  const [usGaps, ukGaps, topComps] = await Promise.all([
+    semrush({ type: "domain_domains", domains: domainsUS, database: "us", display_limit: 25, display_sort: "nq_desc", export_columns: cols }),
+    semrush({ type: "domain_domains", domains: domainsUK, database: "uk", display_limit: 20, display_sort: "nq_desc", export_columns: cols }),
+    semrush({ type: "domain_organic_organic", domain: DOMAIN, database: "us", display_limit: 5, export_columns: "Dn,Cr,Or,Ot" })
+  ]);
+  const mapGap = rows => rows.map(r => ({
+    keyword: r["Keyword"] || r["Ph"] || "",
+    volume:  parseInt(r["Search Volume"] || r["Nq"] || 0),
+    cpc:     parseFloat(r["CPC"] || r["Cp"] || 0).toFixed(2),
+    kd:      parseInt(r["Keyword Difficulty"] || r["Kd"] || 0),
+    comp1_pos: r["P0"] || r[`${COMPETITORS[0]}`] || "—",
+    comp2_pos: r["P1"] || r[`${COMPETITORS[1]}`] || "—"
+  }));
+  const mapComp = rows => rows.map(r => ({
+    domain:   r["Domain"] || r["Dn"] || "",
+    keywords: parseInt(r["Organic Keywords"] || r["Or"] || 0),
+    traffic:  parseInt(r["Organic Traffic"]  || r["Ot"] || 0)
+  }));
+  return { us_gaps: mapGap(usGaps), uk_gaps: mapGap(ukGaps), top_competitors: mapComp(topComps) };
 }
 
-// ─── MODULE 5: New Keyword Opportunities ─────────────────────────────────────
+// ─── MODULE 5: Keyword Opportunities ─────────────────────────────────────────
 async function fetchOpportunities() {
-  console.log("🎯 [5/5] New keyword opportunities...");
-  const raw = await callClaude(`
-Use Semrush MCP phrase_related reports to find new keyword opportunities for "${DOMAIN}" — a Drupal/AWS/HubSpot digital services agency.
-
-Run phrase_related for these seed terms in database "us", display_limit 20, display_sort "nq_desc", export_columns Ph,Nq,Cp,Co,Kd:
-1. "drupal development agency"
-2. "aws consulting services"
-3. "hubspot implementation services"
-4. "drupal migration services"
-
-From all results combined, select the top 15 keywords where:
-- Volume >= 100
-- KD <= 35
-- CPC >= $8
-
-Return ONLY raw JSON (no markdown):
-{
-  "opportunities": [
-    { "keyword": "", "volume": 0, "cpc": "0.00", "kd": 0, "seed_cluster": "", "priority": "high|medium|low" }
-  ]
+  console.log("🎯 [5/5] Keyword opportunities...");
+  const cols = "Ph,Nq,Cp,Co,Kd";
+  const seeds = ["drupal development agency", "aws consulting services", "hubspot implementation services", "drupal migration services"];
+  const results = await Promise.all(
+    seeds.map(phrase => semrush({ type: "phrase_related", phrase, database: "us", display_limit: 20, display_sort: "nq_desc", export_columns: cols }))
+  );
+  // Flatten, dedupe, filter for commercial intent
+  const seen = new Set();
+  const opps = results.flat()
+    .map(r => ({
+      keyword: r["Keyword"] || r["Ph"] || "",
+      volume:  parseInt(r["Search Volume"] || r["Nq"] || 0),
+      cpc:     parseFloat(r["CPC"] || r["Cp"] || 0).toFixed(2),
+      kd:      parseInt(r["Keyword Difficulty"] || r["Kd"] || 0)
+    }))
+    .filter(r => r.volume >= 100 && r.kd <= 35 && parseFloat(r.cpc) >= 8 && r.keyword)
+    .filter(r => {
+      if (seen.has(r.keyword)) return false;
+      seen.add(r.keyword);
+      return true;
+    })
+    .sort((a, b) => b.volume - a.volume)
+    .slice(0, 15)
+    .map(r => ({
+      ...r,
+      priority: r.kd <= 15 && r.volume >= 200 ? "high" : r.kd <= 25 || r.volume >= 300 ? "medium" : "low"
+    }));
+  return { opportunities: opps };
 }
 
-Set priority to:
-- "high" if KD <= 15 AND volume >= 200
-- "medium" if KD <= 25 OR volume >= 300
-- "low" otherwise`, SEMRUSH, 6000);
-  try { return JSON.parse(raw); } catch { console.warn("⚠️  opportunities parse fail"); return { opportunities: [] }; }
-}
-
-// ─── MODULE 6: AI Strategic Analysis ─────────────────────────────────────────
+// ─── AI Analysis via Claude ───────────────────────────────────────────────────
 async function generateAnalysis(overview, usData, ukData, gaps, opps) {
-  console.log("💡 Generating strategic analysis...");
-  const raw = await callClaude(`
+  console.log("💡 Generating AI analysis...");
+  const prompt = `
 You are a senior SEO strategist reviewing daily audit data for axelerant.com — a Drupal/AWS/HubSpot digital services agency targeting US and UK enterprise clients.
 
-DATA SNAPSHOT:
-- US: ${overview?.us?.keywords} keywords, ~${overview?.us?.traffic} monthly visits, $${overview?.us?.traffic_value} traffic value
-- UK: ${overview?.uk?.keywords} keywords, ~${overview?.uk?.traffic} monthly visits
-- US Quick wins (pos 4-20): ${JSON.stringify((usData?.quick_wins || []).slice(0,10))}
-- UK Quick wins (pos 4-20): ${JSON.stringify((ukData?.quick_wins || []).slice(0,10))}
-- Top competitor gaps: ${JSON.stringify((gaps?.us_gaps || []).slice(0,10))}
-- Top opportunities: ${JSON.stringify((opps?.opportunities || []).slice(0,8))}
+DATA:
+- US: ${overview?.us?.keywords} keywords, ~${overview?.us?.traffic} visits/mo, $${overview?.us?.value} traffic value
+- UK: ${overview?.uk?.keywords} keywords, ~${overview?.uk?.traffic} visits/mo
+- US quick wins (pos 4-20): ${JSON.stringify((usData?.quick_wins||[]).slice(0,10))}
+- UK quick wins (pos 4-20): ${JSON.stringify((ukData?.quick_wins||[]).slice(0,10))}
+- Competitor gaps: ${JSON.stringify((gaps?.us_gaps||[]).slice(0,8))}
+- Opportunities: ${JSON.stringify((opps?.opportunities||[]).slice(0,8))}
 
-Produce a sharp strategic analysis. Return ONLY raw JSON (no markdown):
+Return ONLY valid raw JSON with no markdown fences:
 {
-  "summary": "2-3 sentence overall assessment of axelerant.com's current SEO position",
-  "us_analysis": "2-3 sentences on US performance and key patterns",
-  "uk_analysis": "2-3 sentences on UK performance — note that UK is significantly underdeveloped",
-  "top_priority_actions": [
-    { "action": "", "why": "", "expected_impact": "high|medium|low", "effort": "high|medium|low" }
+  "summary": "2-3 sentence overall assessment",
+  "us_analysis": "2-3 sentences on US performance",
+  "uk_analysis": "2-3 sentences on UK — note it is critically underdeveloped",
+  "priority_actions": [
+    { "action": "", "why": "", "impact": "high|medium|low", "effort": "low|medium|high" }
   ],
   "quick_wins_today": [
     { "keyword": "", "current_pos": 0, "target_pos": 0, "volume": 0, "what_to_do": "" }
   ],
-  "competitor_threats": [
-    { "competitor": "", "threat": "" }
-  ],
-  "highlights": [
-    "one-line insight 1",
-    "one-line insight 2",
-    "one-line insight 3",
-    "one-line insight 4",
-    "one-line insight 5"
-  ]
-}`, [], 3000);
-  try { return JSON.parse(raw); } catch { console.warn("⚠️  analysis parse fail"); return {}; }
+  "highlights": ["insight 1","insight 2","insight 3","insight 4","insight 5"]
+}`;
+  const raw = await callClaude(prompt, 2000);
+  try { return JSON.parse(raw); } catch { return { highlights: ["AI analysis unavailable — check logs"] }; }
 }
 
-// ─── Format Slack Canvas (full detailed report) ───────────────────────────────
-function buildCanvasContent(date, overview, usData, ukData, gaps, opps, analysis) {
-  const fmt   = (n) => typeof n === "number" ? n.toLocaleString() : (n || "—");
-  const usd   = (v) => v ? `$${v}` : "—";
-  const pos   = (p) => p ? `#${p}` : "—";
-  const emoji = (p) => p <= 3 ? "🟢" : p <= 10 ? "🟡" : "🔴";
+// ─── Build Slack Canvas content ───────────────────────────────────────────────
+function buildCanvas(date, overview, usData, ukData, gaps, opps, analysis) {
+  const fmt = n => typeof n === "number" ? n.toLocaleString() : (n || "—");
+  const usd = v => v && v !== "0.00" ? `$${v}` : "—";
+  const pos = p => p ? `#${p}` : "—";
+  const dot = p => parseInt(p) <= 3 ? "🟢" : parseInt(p) <= 10 ? "🟡" : "🔴";
 
-  // Table builder
   const kwTable = (kws = [], limit = 15) => {
-    if (!kws.length) return "_No data available_\n";
-    const rows = kws.slice(0, limit).map(k =>
-      `| ${emoji(k.position)} ${k.keyword} | ${pos(k.position)} | ${fmt(k.volume)} | ${usd(k.cpc)} | ${k.kd ?? "—"} |`
-    ).join("\n");
-    return `| Keyword | Pos | Volume | CPC | KD |\n|---|---|---|---|---|\n${rows}\n`;
+    if (!kws.length) return "_No data_\n";
+    return `| Keyword | Pos | Volume | CPC | KD |\n|---|---|---|---|---|\n` +
+      kws.slice(0, limit).map(k =>
+        `| ${dot(k.position)} ${k.keyword} \\| ${pos(k.position)} \\| ${fmt(k.volume)} \\| ${usd(k.cpc)} \\| ${k.kd ?? "—"} |`
+      ).join("\n") + "\n";
   };
 
   const gapTable = (gaps = [], limit = 15) => {
     if (!gaps.length) return "_No gaps found_\n";
-    const rows = gaps.slice(0, limit).map(g =>
-      `| ${g.keyword} | ${fmt(g.volume)} | ${usd(g.cpc)} | ${g.kd ?? "—"} | ${pos(g.competitor1_pos)} / ${pos(g.competitor2_pos)} |`
-    ).join("\n");
-    return `| Keyword | Volume | CPC | KD | Comp. Positions |\n|---|---|---|---|---|\n${rows}\n`;
+    return `| Keyword | Volume | CPC | KD | Competitor Pos |\n|---|---|---|---|---|\n` +
+      gaps.slice(0, limit).map(g =>
+        `| ${g.keyword} \\| ${fmt(g.volume)} \\| ${usd(g.cpc)} \\| ${g.kd ?? "—"} \\| ${g.comp1_pos} / ${g.comp2_pos} |`
+      ).join("\n") + "\n";
   };
 
   const oppTable = (opps = [], limit = 15) => {
     if (!opps.length) return "_No opportunities found_\n";
-    const rows = opps.slice(0, limit).map(o =>
-      `| ${o.priority === "high" ? "🔥" : o.priority === "medium" ? "✅" : "➡️"} ${o.keyword} | ${fmt(o.volume)} | ${usd(o.cpc)} | ${o.kd ?? "—"} | ${o.seed_cluster || "—"} |`
-    ).join("\n");
-    return `| Keyword | Volume | CPC | KD | Cluster |\n|---|---|---|---|---|\n${rows}\n`;
-  };
-
-  const priorityTable = (actions = []) => {
-    if (!actions.length) return "_No actions generated_\n";
-    return actions.map((a, i) =>
-      `**${i+1}. ${a.action}**\n_Why:_ ${a.why}\n_Impact:_ ${a.expected_impact} | _Effort:_ ${a.effort}\n`
-    ).join("\n");
-  };
-
-  const quickWinsList = (qw = []) => {
-    if (!qw.length) return "_None identified_\n";
-    return qw.map(q =>
-      `- **${q.keyword}** — currently pos ${q.current_pos}, target pos ${q.target_pos} (${fmt(q.volume)} vol)\n  → ${q.what_to_do}`
-    ).join("\n");
+    const icon = p => p === "high" ? "🔥" : p === "medium" ? "✅" : "➡️";
+    return `| Priority | Keyword | Volume | CPC | KD |\n|---|---|---|---|---|\n` +
+      opps.slice(0, limit).map(o =>
+        `| ${icon(o.priority)} ${o.priority} \\| ${o.keyword} \\| ${fmt(o.volume)} \\| ${usd(o.cpc)} \\| ${o.kd ?? "—"} |`
+      ).join("\n") + "\n";
   };
 
   const us = overview?.us || {};
   const uk = overview?.uk || {};
+  const actions = (analysis?.priority_actions || []);
+  const qwToday = (analysis?.quick_wins_today || []);
+  const highlights = (analysis?.highlights || []);
 
-  return `
-# Axelerant SEO Audit — ${date}
+  return `# Axelerant SEO Audit — ${date}
 
 ${analysis?.summary || ""}
 
 ---
 
-## 📊 Overall Performance
+## Overall Performance
 
 | Metric | 🇺🇸 United States | 🇬🇧 United Kingdom |
 |---|---|---|
 | Keywords Ranking | ${fmt(us.keywords)} | ${fmt(uk.keywords)} |
 | Est. Monthly Traffic | ${fmt(us.traffic)} | ${fmt(uk.traffic)} |
-| Traffic Value | $${fmt(us.traffic_value)} | $${fmt(uk.traffic_value)} |
-| Paid Keywords | ${fmt(us.paid_keywords)} | ${fmt(uk.paid_keywords)} |
+| Traffic Value | $${fmt(us.value)} | $${fmt(uk.value)} |
+| Paid Keywords | ${fmt(us.paid)} | ${fmt(uk.paid)} |
 
 ---
 
@@ -296,9 +285,9 @@ ${analysis?.us_analysis || ""}
 
 ${kwTable(usData?.top_keywords, 15)}
 
-### Quick Wins — Positions 4–20 (US)
+### Quick Wins — Positions 4–20
 
-These pages are already indexed. A focused on-page refresh + internal links could push them to top 3.
+These pages are already indexed — a focused on-page refresh and internal link push could move them to top 3.
 
 ${kwTable(usData?.quick_wins, 15)}
 
@@ -312,7 +301,7 @@ ${analysis?.uk_analysis || ""}
 
 ${kwTable(ukData?.top_keywords, 15)}
 
-### Quick Wins — Positions 4–20 (UK)
+### Quick Wins — Positions 4–20
 
 ${kwTable(ukData?.quick_wins, 15)}
 
@@ -320,7 +309,7 @@ ${kwTable(ukData?.quick_wins, 15)}
 
 ## 🏁 Competitor Keyword Gaps
 
-Keywords that **${COMPETITORS[0]}** and **${COMPETITORS[1]}** rank for in the US — that axelerant.com does **not** currently rank for.
+Keywords that ${COMPETITORS[0]} and ${COMPETITORS[1]} rank for — that axelerant.com does NOT.
 
 ### US Gaps
 
@@ -330,19 +319,15 @@ ${gapTable(gaps?.us_gaps, 15)}
 
 ${gapTable(gaps?.uk_gaps, 15)}
 
-### Top Competitors by Relevance
+### Top Competitors
 
-${(gaps?.top_competitors || []).map(c =>
-  `- **${c.domain}** — ${fmt(c.organic_keywords)} keywords, ~${fmt(c.organic_traffic)} monthly traffic`
-).join("\n") || "_No data_"}
+${(gaps?.top_competitors||[]).map(c => `- **${c.domain}** — ${fmt(c.keywords)} keywords, ~${fmt(c.traffic)} monthly traffic`).join("\n") || "_No data_"}
 
 ---
 
 ## 🎯 New Keyword Opportunities
 
-Low KD + high CPC = strong commercial intent with room to rank.
-
-🔥 High priority &nbsp;&nbsp; ✅ Medium priority &nbsp;&nbsp; ➡️ Lower priority
+Low KD + high CPC across Drupal / AWS / HubSpot clusters.
 
 ${oppTable(opps?.opportunities, 15)}
 
@@ -352,52 +337,42 @@ ${oppTable(opps?.opportunities, 15)}
 
 ### Priority Actions
 
-${priorityTable(analysis?.top_priority_actions || [])}
+${actions.map((a, i) => `**${i+1}. ${a.action}**\n_Why:_ ${a.why}\n_Impact:_ ${a.impact} | _Effort:_ ${a.effort}`).join("\n\n") || "_None generated_"}
 
-### Act on These Today (Quick Wins)
+### Act on These Today
 
-${quickWinsList(analysis?.quick_wins_today || [])}
-
-### Competitor Threats to Watch
-
-${(analysis?.competitor_threats || []).map(t =>
-  `- **${t.competitor}**: ${t.threat}`
-).join("\n") || "_None identified_"}
+${qwToday.map(q => `- **${q.keyword}** — currently pos ${q.current_pos}, push to pos ${q.target_pos} (${fmt(q.volume)} vol)\n  → ${q.what_to_do}`).join("\n") || "_None identified_"}
 
 ---
 
 ## 🔑 Today's Key Highlights
 
-${(analysis?.highlights || []).map(h => `- ${h}`).join("\n")}
+${highlights.map(h => `- ${h}`).join("\n")}
 
 ---
 
-_Generated by Axelerant SEO Audit Bot · Powered by Semrush + Claude · ${date}_
-`.trim();
+_Axelerant SEO Audit Bot · Semrush + Claude · ${date}_`;
 }
 
-// ─── Format Slack channel summary card ───────────────────────────────────────
-function buildSlackSummary(date, overview, usData, ukData, analysis, canvasUrl) {
-  const fmt  = (n) => typeof n === "number" ? n.toLocaleString() : (n || "—");
-  const us   = overview?.us || {};
-  const uk   = overview?.uk || {};
-
-  const topUSWin  = usData?.quick_wins?.[0];
-  const topUKWin  = ukData?.quick_wins?.[0];
+// ─── Build Slack summary card ─────────────────────────────────────────────────
+function buildSummary(date, overview, usData, ukData, analysis, canvasUrl) {
+  const fmt = n => typeof n === "number" ? n.toLocaleString() : (n || "—");
+  const us  = overview?.us || {};
+  const uk  = overview?.uk || {};
+  const topUSWin = usData?.quick_wins?.[0];
+  const topUKWin = ukData?.quick_wins?.[0];
   const highlights = (analysis?.highlights || []).slice(0, 5).map(h => `  • ${h}`).join("\n");
-  const topActions = (analysis?.top_priority_actions || []).slice(0, 3).map((a, i) =>
-    `  ${i+1}. *${a.action}* _(${a.expected_impact} impact, ${a.effort} effort)_`
-  ).join("\n");
+  const actions = (analysis?.priority_actions || []).slice(0, 3)
+    .map((a, i) => `  ${i+1}. *${a.action}* _(${a.impact} impact · ${a.effort} effort)_`).join("\n");
 
-  return `
-*📊 Axelerant Daily SEO Audit — ${date}*
+  return `*📊 Axelerant Daily SEO Audit — ${date}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-🇺🇸 *US* — *${fmt(us.keywords)}* keywords · *${fmt(us.traffic)}* visits/mo · *$${fmt(us.traffic_value)}* value
+🇺🇸 *US* — *${fmt(us.keywords)}* keywords · *${fmt(us.traffic)}* visits/mo · *$${fmt(us.value)}* value
 🇬🇧 *UK* — *${fmt(uk.keywords)}* keywords · *${fmt(uk.traffic)}* visits/mo
+${topUSWin ? `\n🎯 *Top US quick win:* _${topUSWin.keyword}_ at pos *${topUSWin.position}* (${fmt(topUSWin.volume)} vol · $${topUSWin.cpc} CPC · KD ${topUSWin.kd})` : ""}
+${topUKWin ? `🎯 *Top UK quick win:* _${topUKWin.keyword}_ at pos *${topUKWin.position}* (${fmt(topUKWin.volume)} vol · KD ${topUKWin.kd})` : ""}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${topUSWin ? `\n🎯 *Top US quick win:* _${topUSWin.keyword}_ at pos *${topUSWin.position}* (${fmt(topUSWin.volume)} vol, $${topUSWin.cpc} CPC)\n` : ""}${topUKWin ? `🎯 *Top UK quick win:* _${topUKWin.keyword}_ at pos *${topUKWin.position}* (${fmt(topUKWin.volume)} vol)\n` : ""}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 💡 *Highlights*
@@ -405,37 +380,40 @@ ${highlights}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-🔺 *Top Priority Actions*
-${topActions}
+🔺 *Priority Actions*
+${actions}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-📄 *Full detailed report →* ${canvasUrl || "_Canvas link unavailable_"}
-`.trim();
+📄 *Full detailed report →* ${canvasUrl || "_Canvas unavailable_"}`;
 }
 
-// ─── Post Canvas + Summary to Slack ──────────────────────────────────────────
-async function postToSlack(summaryMessage, canvasTitle, canvasContent) {
-  console.log("📨 Creating Slack Canvas + posting summary...");
+// ─── Post Canvas + message to Slack ──────────────────────────────────────────
+async function postToSlack(summaryText, canvasTitle, canvasContent) {
+  console.log("📨 Creating Slack Canvas...");
 
-  const prompt = `
-You are posting a daily SEO audit report to Slack. Do these two things in order using the Slack MCP tools:
+  // Create canvas
+  const canvasRes = await slackPost("canvases.create", {
+    title: canvasTitle,
+    document_content: {
+      type: "markdown",
+      markdown: canvasContent
+    }
+  });
+  const canvasId  = canvasRes.canvas_id;
+  const canvasUrl = `https://axelerant.slack.com/canvas/${canvasId}`;
+  console.log("✅ Canvas created:", canvasUrl);
 
-STEP 1 — Create a Slack Canvas with:
-  title: "${canvasTitle}"
-  content: ${JSON.stringify(canvasContent)}
+  // Post summary message with canvas link
+  const finalMessage = summaryText.replace("_Canvas unavailable_", canvasUrl);
+  await slackPost("chat.postMessage", {
+    channel: SLACK_CHANNEL_ID,
+    text: finalMessage,
+    mrkdwn: true
+  });
+  console.log("✅ Summary posted to #wg-digital-bu-new-revenue");
 
-STEP 2 — Send a message to channel "${SLACK_CHANNEL_ID}" with this exact text (replace CANVAS_LINK with the actual URL from step 1):
-${summaryMessage.replace("_Canvas link unavailable_", "CANVAS_LINK")}
-
-Return the canvas URL at the end of your response in this format: CANVAS_URL: <url>
-`;
-
-  const result = await callClaude(prompt, SLACK, 2000);
-
-  // Try to extract canvas URL from response
-  const match = result.match(/CANVAS_URL:\s*(https?:\/\/\S+)/i);
-  return match ? match[1] : null;
+  return canvasUrl;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -444,11 +422,9 @@ async function main() {
   console.log(`\n🚀 Axelerant Full SEO Audit — ${date}\n`);
 
   try {
-    // Run all modules — overview + rankings in parallel, then gaps + opps
-    console.log("⏳ Running all audit modules...\n");
-
+    // Run all data modules — parallel where safe
     const [overview, usData, ukData] = await Promise.all([
-      fetchDomainOverview(),
+      fetchOverview(),
       fetchUSRankings(),
       fetchUKRankings()
     ]);
@@ -460,19 +436,14 @@ async function main() {
 
     const analysis = await generateAnalysis(overview, usData, ukData, gaps, opps);
 
-    // Build Canvas content (full detailed report)
-    const canvasContent = buildCanvasContent(date, overview, usData, ukData, gaps, opps, analysis);
-    const canvasTitle   = `Axelerant SEO Audit — ${date}`;
-
-    // Build Slack summary card (links to Canvas)
-    const summaryMessage = buildSlackSummary(date, overview, usData, ukData, analysis, null);
+    // Build outputs
+    const canvasContent = buildCanvas(date, overview, usData, ukData, gaps, opps, analysis);
+    const summaryText   = buildSummary(date, overview, usData, ukData, analysis, null);
 
     // Post to Slack
-    const canvasUrl = await postToSlack(summaryMessage, canvasTitle, canvasContent);
-    console.log(`\n✅ Canvas created: ${canvasUrl || "URL not captured"}`);
-    console.log(`✅ Summary posted to #wg-digital-bu-new-revenue`);
-    console.log(`\n🎉 Full audit complete — ${date}\n`);
+    await postToSlack(summaryText, `Axelerant SEO Audit — ${date}`, canvasContent);
 
+    console.log(`\n🎉 Audit complete — ${date}\n`);
   } catch (err) {
     console.error("❌ Audit failed:", err.message);
     process.exit(1);
