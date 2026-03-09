@@ -356,8 +356,9 @@ _Axelerant SEO Audit Bot · Semrush + Claude · ${date}_`;
 }
 
 // ─── Build Slack summary card ─────────────────────────────────────────────────
-function buildSummary(date, overview, usData, ukData, analysis, canvasUrl) {
+function buildSummary(date, overview, usData, ukData, analysis) {
   const fmt = n => typeof n === "number" ? n.toLocaleString() : (n || "—");
+  const usd = v => v && v !== "0.00" ? `$${v}` : "—";
   const us  = overview?.us || {};
   const uk  = overview?.uk || {};
   const topUSWin = usData?.quick_wins?.[0];
@@ -371,12 +372,12 @@ function buildSummary(date, overview, usData, ukData, analysis, canvasUrl) {
 
 🇺🇸 *US* — *${fmt(us.keywords)}* keywords · *${fmt(us.traffic)}* visits/mo · *$${fmt(us.value)}* value
 🇬🇧 *UK* — *${fmt(uk.keywords)}* keywords · *${fmt(uk.traffic)}* visits/mo
-${topUSWin ? `\n🎯 *Top US quick win:* _${topUSWin.keyword}_ at pos *${topUSWin.position}* (${fmt(topUSWin.volume)} vol · $${topUSWin.cpc} CPC · KD ${topUSWin.kd})` : ""}
-${topUKWin ? `🎯 *Top UK quick win:* _${topUKWin.keyword}_ at pos *${topUKWin.position}* (${fmt(topUKWin.volume)} vol · KD ${topUKWin.kd})` : ""}
+${topUSWin ? `\n🎯 *Top US quick win:* _${topUSWin.keyword}_ — pos *${topUSWin.position}* · ${fmt(topUSWin.volume)} vol · ${usd(topUSWin.cpc)} CPC · KD ${topUSWin.kd}` : ""}
+${topUKWin ? `🎯 *Top UK quick win:* _${topUKWin.keyword}_ — pos *${topUKWin.position}* · ${fmt(topUKWin.volume)} vol · KD ${topUKWin.kd}` : ""}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-💡 *Highlights*
+💡 *Key Highlights*
 ${highlights}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -385,36 +386,79 @@ ${highlights}
 ${actions}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-📄 *Full detailed report →* ${canvasUrl || "_Canvas unavailable_"}`;
+_Full details in thread below ↓_`;
 }
 
-// ─── Post Canvas + message to Slack ──────────────────────────────────────────
-async function postToSlack(summaryText, canvasTitle, canvasContent) {
-  console.log("📨 Creating Slack Canvas...");
+// ─── Build thread sections ────────────────────────────────────────────────────
+function buildThreadSections(date, overview, usData, ukData, gaps, opps, analysis) {
+  const fmt = n => typeof n === "number" ? n.toLocaleString() : (n || "—");
+  const usd = v => v && v !== "0.00" ? `$${v}` : "—";
+  const pos = p => p ? `#${p}` : "—";
+  const dot = p => parseInt(p) <= 3 ? "🟢" : parseInt(p) <= 10 ? "🟡" : "🔴";
 
-  // Create canvas
-  const canvasRes = await slackPost("canvases.create", {
-    title: canvasTitle,
-    document_content: {
-      type: "markdown",
-      markdown: canvasContent
-    }
-  });
-  const canvasId  = canvasRes.canvas_id;
-  const canvasUrl = `https://axelerant.slack.com/canvas/${canvasId}`;
-  console.log("✅ Canvas created:", canvasUrl);
+  const kwLines = (kws = [], limit = 10) =>
+    kws.slice(0, limit).map(k =>
+      `${dot(k.position)} *${k.keyword}* — pos ${pos(k.position)} · ${fmt(k.volume)} vol · ${usd(k.cpc)} CPC · KD ${k.kd ?? "—"}`
+    ).join("\n") || "_No data_";
 
-  // Post summary message with canvas link
-  const finalMessage = summaryText.replace("_Canvas unavailable_", canvasUrl);
-  await slackPost("chat.postMessage", {
+  const gapLines = (gs = [], limit = 8) =>
+    gs.slice(0, limit).map(g =>
+      `• *${g.keyword}* — ${fmt(g.volume)} vol · ${usd(g.cpc)} CPC · KD ${g.kd ?? "—"}`
+    ).join("\n") || "_No gaps found_";
+
+  const oppLines = (os = [], limit = 8) => {
+    const icon = p => p === "high" ? "🔥" : p === "medium" ? "✅" : "➡️";
+    return os.slice(0, limit).map(o =>
+      `${icon(o.priority)} *${o.keyword}* — ${fmt(o.volume)} vol · ${usd(o.cpc)} CPC · KD ${o.kd ?? "—"}`
+    ).join("\n") || "_No opportunities_";
+  };
+
+  const qwToday = (analysis?.quick_wins_today || []);
+  const allActions = (analysis?.priority_actions || []);
+
+  return [
+    // Section 1: US Rankings
+    `*🇺🇸 US Rankings — Top Keywords*\n\n${kwLines(usData?.top_keywords, 10)}`,
+
+    // Section 2: US Quick Wins
+    `*🇺🇸 US Quick Wins (pos 4–20) — Push these to top 3*\n\n${kwLines(usData?.quick_wins, 10)}`,
+
+    // Section 3: UK Rankings + Quick Wins
+    `*🇬🇧 UK Rankings — Top Keywords*\n\n${kwLines(ukData?.top_keywords, 8)}\n\n*🇬🇧 UK Quick Wins (pos 4–20)*\n\n${kwLines(ukData?.quick_wins, 8)}`,
+
+    // Section 4: Competitor gaps
+    `*🏁 Competitor Keyword Gaps (US)*\nKeywords appnovation.com / specbee.com rank for — axelerant.com does NOT:\n\n${gapLines(gaps?.us_gaps, 10)}\n\n*🏁 Competitor Keyword Gaps (UK)*\n\n${gapLines(gaps?.uk_gaps, 6)}`,
+
+    // Section 5: Opportunities + Actions
+    `*🎯 New Keyword Opportunities*\nLow KD + high CPC across Drupal / AWS / HubSpot:\n\n${oppLines(opps?.opportunities, 10)}\n\n*📋 Act on These Today*\n\n${qwToday.map(q => `• *${q.keyword}* (pos ${q.current_pos} → ${q.target_pos}, ${fmt(q.volume)} vol)\n  → ${q.what_to_do}`).join("\n") || "_None identified_"}\n\n*🔺 All Priority Actions*\n\n${allActions.map((a, i) => `${i+1}. *${a.action}*\n   _Why:_ ${a.why}\n   _Impact:_ ${a.impact} · _Effort:_ ${a.effort}`).join("\n\n") || "_None_"}`
+  ];
+}
+
+// ─── Post to Slack (summary + thread) ────────────────────────────────────────
+async function postToSlack(summary, threadSections) {
+  console.log("📨 Posting summary to Slack...");
+
+  // Post main summary message
+  const mainRes = await slackPost("chat.postMessage", {
     channel: SLACK_CHANNEL_ID,
-    text: finalMessage,
+    text: summary,
     mrkdwn: true
   });
-  console.log("✅ Summary posted to #wg-digital-bu-new-revenue");
+  const thread_ts = mainRes.ts;
+  console.log("✅ Summary posted");
 
-  return canvasUrl;
+  // Post each section as a thread reply
+  for (let i = 0; i < threadSections.length; i++) {
+    await slackPost("chat.postMessage", {
+      channel: SLACK_CHANNEL_ID,
+      text: threadSections[i],
+      thread_ts,
+      mrkdwn: true
+    });
+    console.log(`✅ Thread section ${i + 1}/${threadSections.length} posted`);
+    // Small delay to avoid rate limiting
+    await new Promise(r => setTimeout(r, 500));
+  }
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -438,11 +482,11 @@ async function main() {
     const analysis = await generateAnalysis(overview, usData, ukData, gaps, opps);
 
     // Build outputs
-    const canvasContent = buildCanvas(date, overview, usData, ukData, gaps, opps, analysis);
-    const summaryText   = buildSummary(date, overview, usData, ukData, analysis, null);
+    const summary        = buildSummary(date, overview, usData, ukData, analysis);
+    const threadSections = buildThreadSections(date, overview, usData, ukData, gaps, opps, analysis);
 
     // Post to Slack
-    await postToSlack(summaryText, `Axelerant SEO Audit — ${date}`, canvasContent);
+    await postToSlack(summary, threadSections);
 
     console.log(`\n🎉 Audit complete — ${date}\n`);
   } catch (err) {
