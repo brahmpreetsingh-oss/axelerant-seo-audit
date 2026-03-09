@@ -1,4 +1,4 @@
-name: Axelerant Daily SEO Audit (Detailed)
+name: Axelerant Daily SEO Audit
 
 on:
   schedule:
@@ -26,9 +26,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Run Detailed SEO Audit
+      - name: Run SEO Audit
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id || 'C07B43GM812' }}
-          TARGET_DOMAIN: ${{ inputs.target_domain || 'axelerant.com' }}
+          SEMRUSH_API_KEY:   ${{ secrets.SEMRUSH_API_KEY }}
+          SLACK_BOT_TOKEN:   ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID:  ${{ inputs.slack_channel_id || 'C07B43GM812' }}
+          TARGET_DOMAIN:     ${{ inputs.target_domain    || 'axelerant.com' }}
         run: node seo-audit.js
+      - name: Alert on Failure
+        if: failure()
+        run: echo "::error::SEO Audit failed — check logs above."
