@@ -9,6 +9,7 @@
  *   ANTHROPIC_API_KEY   — https://console.anthropic.com/settings/keys
  *   SEMRUSH_API_KEY     — https://www.semrush.com/api-analytics/
  *   SLACK_BOT_TOKEN     — https://api.slack.com/apps → your app → OAuth tokens
+ *
  * OPTIONAL:
  *   SLACK_CHANNEL_ID    — default: C07B43GM812 (#wg-digital-bu-new-revenue)
  *   TARGET_DOMAIN       — default: axelerant.com
